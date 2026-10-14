@@ -1327,7 +1327,7 @@ func TestContainerRegistryService_InspectImageDigest_RetriesStoredCredentialsAft
 	assert.False(t, result.UsedCredential)
 }
 
-func TestContainerRegistryService_InspectImageDigest_DoesNotFallbackOnTLSFailure(t *testing.T) {
+func TestContainerRegistryService_InspectImageDigest_HandlesTLSFailures(t *testing.T) {
 	svc := NewContainerRegistryService(nil, func(context.Context) (RegistryDaemonClient, error) {
 		return &fakeRegistryDaemonClient{
 			distributionInspectFn: func(ctx context.Context, imageRef string, options client.DistributionInspectOptions) (client.DistributionInspectResult, error) {
@@ -1345,6 +1345,39 @@ func TestContainerRegistryService_InspectImageDigest_DoesNotFallbackOnTLSFailure
 	assert.NotContains(t, err.Error(), "registry fallback failed")
 	assert.Equal(t, "anonymous", result.AuthMethod)
 	assert.Equal(t, "registry.example.com", result.AuthRegistry)
+
+	// Handshake timeouts are transient and must not be treated like certificate failures.
+	wantDigest := digest.FromString("tls-handshake-fallback").String()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if registryPingInternal(w, r, "") {
+			return
+		}
+		if r.URL.Path == "/v2/team/app/manifests/1.2.3" {
+			writeManifestHeadInternal(w, wantDigest)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	var daemonCalls int
+	timeoutSvc := NewContainerRegistryService(nil, func(context.Context) (RegistryDaemonClient, error) {
+		return &fakeRegistryDaemonClient{
+			distributionInspectFn: func(_ context.Context, _ string, _ client.DistributionInspectOptions) (client.DistributionInspectResult, error) {
+				daemonCalls++
+				return client.DistributionInspectResult{}, errors.New("Error response from daemon: Get \"https://lscr.io/v2/\": net/http: TLS handshake timeout")
+			},
+		}, nil
+	}, nil, nil)
+	timeoutSvc.distributionHTTPClient = server.Client()
+
+	fallbackResult, fallbackErr := timeoutSvc.InspectImageDigest(t.Context(), serverURL.Host+"/team/app:1.2.3", nil)
+	require.NoError(t, fallbackErr)
+	assert.Equal(t, 1, daemonCalls)
+	assert.Equal(t, wantDigest, fallbackResult.Digest)
+	assert.Equal(t, "anonymous", fallbackResult.AuthMethod)
 }
 
 func TestContainerRegistryService_InspectImageDigest_PreservesDaemonAndFallbackErrors(t *testing.T) {
@@ -1707,12 +1740,14 @@ func TestClassifyDigestError(t *testing.T) {
 		err  error
 		kind error
 	}{
-		"rate limit":         {errors.New("toomanyrequests: rate limit exceeded"), common.ErrUnavailable},
-		"server error":       {&transport.Error{StatusCode: http.StatusBadGateway}, common.ErrUnavailable},
-		"connection refused": {errors.New("dial tcp 10.0.0.1:443: connect: connection refused"), common.ErrUnavailable},
-		"unauthorized":       {&transport.Error{StatusCode: http.StatusUnauthorized}, common.ErrUnauthorized},
-		"not found":          {&transport.Error{StatusCode: http.StatusNotFound}, common.ErrNotFound},
-		"manifest unknown":   {errors.New("MANIFEST_UNKNOWN: manifest unknown"), common.ErrNotFound},
+		"rate limit":          {errors.New("toomanyrequests: rate limit exceeded"), common.ErrUnavailable},
+		"server error":        {&transport.Error{StatusCode: http.StatusBadGateway}, common.ErrUnavailable},
+		"connection refused":  {errors.New("dial tcp 10.0.0.1:443: connect: connection refused"), common.ErrUnavailable},
+		"unauthorized":        {&transport.Error{StatusCode: http.StatusUnauthorized}, common.ErrUnauthorized},
+		"not found":           {&transport.Error{StatusCode: http.StatusNotFound}, common.ErrNotFound},
+		"manifest unknown":    {errors.New("MANIFEST_UNKNOWN: manifest unknown"), common.ErrNotFound},
+		"tls handshake":       {errors.New("Get \"https://lscr.io/v2/\": net/http: TLS handshake timeout"), common.ErrTimeout},
+		"wrapped TLS timeout": {&url.Error{Op: "Get", URL: "https://lscr.io/v2/", Err: &net.DNSError{Err: "TLS handshake timeout", IsTimeout: true}}, common.ErrTimeout},
 	}
 	for name, tc := range cases {
 		require.ErrorIs(t, classifyDigestErrorInternal(tc.err), tc.kind, name)

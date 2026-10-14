@@ -1000,11 +1000,12 @@ func classifyDigestErrorInternal(err error) error {
 	case errors.As(err, &dnsErr) && dnsErr.IsNotFound:
 		// A registry host that does not resolve is a bad reference, not an outage worth retrying.
 		return err
+	case errors.Is(err, context.DeadlineExceeded), errdefs.IsDeadlineExceeded(err),
+		strings.Contains(errLower, "tls handshake timeout"), errors.As(err, &netErr) && netErr.Timeout():
+		return common.Classify(common.ErrTimeout, err)
 	case isRateLimitErrorInternal(err), errdefs.IsUnavailable(err), errors.As(err, &netErr),
 		strings.Contains(errLower, "connection refused"), isTransport && transportErr.StatusCode >= http.StatusInternalServerError:
 		return common.Classify(common.ErrUnavailable, err)
-	case errors.Is(err, context.DeadlineExceeded), errdefs.IsDeadlineExceeded(err):
-		return common.Classify(common.ErrTimeout, err)
 	case browse.IsUnauthorizedRegistryError(err):
 		return common.Classify(common.ErrUnauthorized, err)
 	case errdefs.IsNotFound(err), isTransport && transportErr.StatusCode == http.StatusNotFound, strings.Contains(errLower, "manifest unknown"):
@@ -1537,7 +1538,8 @@ func isDistributionFallbackEligibleInternal(err error) bool {
 	errLower := strings.ToLower(err.Error())
 	return strings.Contains(errLower, "context deadline exceeded") ||
 		strings.Contains(errLower, "client.timeout exceeded") ||
-		strings.Contains(errLower, "i/o timeout")
+		strings.Contains(errLower, "i/o timeout") ||
+		strings.Contains(errLower, "tls handshake timeout")
 }
 
 func (
