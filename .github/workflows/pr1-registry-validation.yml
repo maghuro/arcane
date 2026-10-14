@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - validation/pr1-registry-ci
+  pull_request:
+    branches:
+      - fix/image-registry-fallback-timeouts
 
 permissions:
   contents: read
