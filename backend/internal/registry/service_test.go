@@ -1327,6 +1327,84 @@ func TestContainerRegistryService_InspectImageDigest_RetriesStoredCredentialsAft
 	assert.False(t, result.UsedCredential)
 }
 
+func TestContainerRegistryService_InspectImageDigest_FallsBackOnTLSHandshakeTimeout(t *testing.T) {
+	wantDigest := digest.FromString("tls-handshake-fallback").String()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if registryPingInternal(w, r, "") {
+			return
+		}
+		if r.URL.Path == "/v2/team/app/manifests/1.2.3" {
+			writeManifestHeadInternal(w, wantDigest)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	var daemonCalls int
+	svc := NewContainerRegistryService(nil, func(context.Context) (RegistryDaemonClient, error) {
+		return &fakeRegistryDaemonClient{
+			distributionInspectFn: func(_ context.Context, _ string, _ client.DistributionInspectOptions) (client.DistributionInspectResult, error) {
+				daemonCalls++
+				return client.DistributionInspectResult{}, errors.New("Error response from daemon: Get \"https://lscr.io/v2/\": net/http: TLS handshake timeout")
+			},
+		}, nil
+	}, nil, nil)
+	svc.distributionHTTPClient = server.Client()
+
+	result, err := svc.InspectImageDigest(t.Context(), serverURL.Host+"/team/app:1.2.3", nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, daemonCalls)
+	assert.Equal(t, wantDigest, result.Digest)
+	assert.Equal(t, "anonymous", result.AuthMethod)
+}
+
+func TestContainerRegistryService_InspectImageDigest_ReservesTimeForFallback(t *testing.T) {
+	wantDigest := digest.FromString("daemon-deadline-fallback").String()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if registryPingInternal(w, r, "") {
+			return
+		}
+		if r.URL.Path == "/v2/team/app/manifests/1.2.3" {
+			writeManifestHeadInternal(w, wantDigest)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	callerDeadline, ok := ctx.Deadline()
+	require.True(t, ok)
+
+	var daemonDeadline time.Time
+	svc := NewContainerRegistryService(nil, func(context.Context) (RegistryDaemonClient, error) {
+		return &fakeRegistryDaemonClient{
+			distributionInspectFn: func(daemonCtx context.Context, _ string, _ client.DistributionInspectOptions) (client.DistributionInspectResult, error) {
+				var hasDeadline bool
+				daemonDeadline, hasDeadline = daemonCtx.Deadline()
+				assert.True(t, hasDeadline)
+				<-daemonCtx.Done()
+				return client.DistributionInspectResult{}, daemonCtx.Err()
+			},
+		}, nil
+	}, nil, nil)
+	svc.distributionHTTPClient = server.Client()
+
+	result, err := svc.InspectImageDigest(ctx, serverURL.Host+"/team/app:1.2.3", nil)
+	require.NoError(t, err)
+	assert.True(t, daemonDeadline.Before(callerDeadline))
+	assert.Equal(t, wantDigest, result.Digest)
+	assert.NoError(t, ctx.Err(), "fallback should finish before the caller's deadline")
+}
+
 func TestContainerRegistryService_InspectImageDigest_DoesNotFallbackOnTLSFailure(t *testing.T) {
 	svc := NewContainerRegistryService(nil, func(context.Context) (RegistryDaemonClient, error) {
 		return &fakeRegistryDaemonClient{
@@ -1713,6 +1791,7 @@ func TestClassifyDigestError(t *testing.T) {
 		"unauthorized":       {&transport.Error{StatusCode: http.StatusUnauthorized}, common.ErrUnauthorized},
 		"not found":          {&transport.Error{StatusCode: http.StatusNotFound}, common.ErrNotFound},
 		"manifest unknown":   {errors.New("MANIFEST_UNKNOWN: manifest unknown"), common.ErrNotFound},
+		"tls handshake":      {errors.New("Get \"https://lscr.io/v2/\": net/http: TLS handshake timeout"), common.ErrTimeout},
 	}
 	for name, tc := range cases {
 		require.ErrorIs(t, classifyDigestErrorInternal(tc.err), tc.kind, name)
