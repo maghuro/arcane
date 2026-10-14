@@ -1209,12 +1209,18 @@ func TestContainerRegistryService_InspectImageDigest_FallsBackWhenDistributionNo
 	assert.Equal(t, "anonymous", result.AuthMethod)
 	assert.Equal(t, serverURL.Host, result.AuthRegistry)
 
-	// A hung daemon must leave part of the caller's deadline for the registry fallback.
+	// Unknown/private registries retain the full daemon deadline.
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	callerDeadline, ok := ctx.Deadline()
 	require.True(t, ok)
+	privateCtx, privateCancel := daemonDigestLookupContextInternal(ctx, serverURL.Host)
+	privateDeadline, ok := privateCtx.Deadline()
+	require.True(t, ok)
+	assert.Equal(t, callerDeadline, privateDeadline)
+	privateCancel()
 
+	// Known HTTPS registries leave time for the direct fallback when the daemon stalls.
 	var daemonDeadline time.Time
 	stalledSvc := NewContainerRegistryService(nil, func(context.Context) (RegistryDaemonClient, error) {
 		return &fakeRegistryDaemonClient{
@@ -1227,8 +1233,12 @@ func TestContainerRegistryService_InspectImageDigest_FallsBackWhenDistributionNo
 			},
 		}, nil
 	}, nil, nil)
-	stalledSvc.distributionHTTPClient = server.Client()
-	stalledResult, stalledErr := stalledSvc.InspectImageDigest(ctx, serverURL.Host+"/team/app:1.2.3", nil)
+	stalledSvc.distributionHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		localReq := req.Clone(req.Context())
+		localReq.URL.Host = serverURL.Host
+		return server.Client().Do(localReq)
+	})}
+	stalledResult, stalledErr := stalledSvc.InspectImageDigest(ctx, "lscr.io/team/app:1.2.3", nil)
 	require.NoError(t, stalledErr)
 	assert.True(t, daemonDeadline.Before(callerDeadline))
 	assert.Equal(t, wantDigest, stalledResult.Digest)
@@ -1772,6 +1782,7 @@ func TestClassifyDigestError(t *testing.T) {
 		"not found":          {&transport.Error{StatusCode: http.StatusNotFound}, common.ErrNotFound},
 		"manifest unknown":   {errors.New("MANIFEST_UNKNOWN: manifest unknown"), common.ErrNotFound},
 		"tls handshake":      {errors.New("Get \"https://lscr.io/v2/\": net/http: TLS handshake timeout"), common.ErrTimeout},
+		"wrapped TLS timeout": {&url.Error{Op: "Get", URL: "https://lscr.io/v2/", Err: &net.DNSError{Err: "TLS handshake timeout", IsTimeout: true}}, common.ErrTimeout},
 	}
 	for name, tc := range cases {
 		require.ErrorIs(t, classifyDigestErrorInternal(tc.err), tc.kind, name)
