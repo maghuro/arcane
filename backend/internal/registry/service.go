@@ -64,6 +64,8 @@ const (
 	registryRateLimitKeyPrefix          = "container_registry:rate_limits:"
 	dockerHubRateLimitRepository        = "ratelimitpreview/test"
 	dockerHubRateLimitTag               = "latest"
+	// Bound daemon digest queries so direct registry fallback has time to run.
+	daemonDigestLookupTimeout           = 10 * time.Second
 )
 
 type RegistryDaemonClient interface {
@@ -924,7 +926,9 @@ func (s *ContainerRegistryService) InspectImageDigest(ctx context.Context, image
 	bo.RandomizationFactor = 0.3
 
 	_, retryErr := backoff.Retry(ctx, func() (*containerregistry.DigestResult, error) {
-		result, inspectImageDigestViaDaemonErr := s.inspectImageDigestViaDaemonInternal(ctx, parts.NormalizedRef, parts.RegistryHost, externalCreds)
+		daemonCtx, cancelDaemon := daemonDigestLookupContextInternal(ctx)
+		result, inspectImageDigestViaDaemonErr := s.inspectImageDigestViaDaemonInternal(daemonCtx, parts.NormalizedRef, parts.RegistryHost, externalCreds)
+		cancelDaemon()
 		if inspectImageDigestViaDaemonErr == nil {
 			lastResult = result
 			return result, nil
@@ -986,6 +990,16 @@ func (s *ContainerRegistryService) InspectImageDigest(ctx context.Context, image
 	return lastResult, nil
 }
 
+func daemonDigestLookupContextInternal(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := daemonDigestLookupTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < 2*timeout {
+			timeout = remaining / 2
+		}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
 // classifyDigestErrorInternal tags digest lookup failures so callers can retry
 // transient ones. Retryable kinds are checked first because fallback errors are joined.
 func classifyDigestErrorInternal(err error) error {
@@ -1003,7 +1017,7 @@ func classifyDigestErrorInternal(err error) error {
 	case isRateLimitErrorInternal(err), errdefs.IsUnavailable(err), errors.As(err, &netErr),
 		strings.Contains(errLower, "connection refused"), isTransport && transportErr.StatusCode >= http.StatusInternalServerError:
 		return common.Classify(common.ErrUnavailable, err)
-	case errors.Is(err, context.DeadlineExceeded), errdefs.IsDeadlineExceeded(err):
+	case errors.Is(err, context.DeadlineExceeded), errdefs.IsDeadlineExceeded(err), strings.Contains(errLower, "tls handshake timeout"):
 		return common.Classify(common.ErrTimeout, err)
 	case browse.IsUnauthorizedRegistryError(err):
 		return common.Classify(common.ErrUnauthorized, err)
@@ -1537,7 +1551,8 @@ func isDistributionFallbackEligibleInternal(err error) bool {
 	errLower := strings.ToLower(err.Error())
 	return strings.Contains(errLower, "context deadline exceeded") ||
 		strings.Contains(errLower, "client.timeout exceeded") ||
-		strings.Contains(errLower, "i/o timeout")
+		strings.Contains(errLower, "i/o timeout") ||
+		strings.Contains(errLower, "tls handshake timeout")
 }
 
 func (
