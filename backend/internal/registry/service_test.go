@@ -1775,13 +1775,13 @@ func TestClassifyDigestError(t *testing.T) {
 		err  error
 		kind error
 	}{
-		"rate limit":         {errors.New("toomanyrequests: rate limit exceeded"), common.ErrUnavailable},
-		"server error":       {&transport.Error{StatusCode: http.StatusBadGateway}, common.ErrUnavailable},
-		"connection refused": {errors.New("dial tcp 10.0.0.1:443: connect: connection refused"), common.ErrUnavailable},
-		"unauthorized":       {&transport.Error{StatusCode: http.StatusUnauthorized}, common.ErrUnauthorized},
-		"not found":          {&transport.Error{StatusCode: http.StatusNotFound}, common.ErrNotFound},
-		"manifest unknown":   {errors.New("MANIFEST_UNKNOWN: manifest unknown"), common.ErrNotFound},
-		"tls handshake":      {errors.New("Get \"https://lscr.io/v2/\": net/http: TLS handshake timeout"), common.ErrTimeout},
+		"rate limit":          {errors.New("toomanyrequests: rate limit exceeded"), common.ErrUnavailable},
+		"server error":        {&transport.Error{StatusCode: http.StatusBadGateway}, common.ErrUnavailable},
+		"connection refused":  {errors.New("dial tcp 10.0.0.1:443: connect: connection refused"), common.ErrUnavailable},
+		"unauthorized":        {&transport.Error{StatusCode: http.StatusUnauthorized}, common.ErrUnauthorized},
+		"not found":           {&transport.Error{StatusCode: http.StatusNotFound}, common.ErrNotFound},
+		"manifest unknown":    {errors.New("MANIFEST_UNKNOWN: manifest unknown"), common.ErrNotFound},
+		"tls handshake":       {errors.New("Get \"https://lscr.io/v2/\": net/http: TLS handshake timeout"), common.ErrTimeout},
 		"wrapped TLS timeout": {&url.Error{Op: "Get", URL: "https://lscr.io/v2/", Err: &net.DNSError{Err: "TLS handshake timeout", IsTimeout: true}}, common.ErrTimeout},
 	}
 	for name, tc := range cases {
