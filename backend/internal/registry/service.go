@@ -64,7 +64,6 @@ const (
 	registryRateLimitKeyPrefix          = "container_registry:rate_limits:"
 	dockerHubRateLimitRepository        = "ratelimitpreview/test"
 	dockerHubRateLimitTag               = "latest"
-	daemonDigestLookupTimeout           = 10 * time.Second
 )
 
 type RegistryDaemonClient interface {
@@ -925,9 +924,7 @@ func (s *ContainerRegistryService) InspectImageDigest(ctx context.Context, image
 	bo.RandomizationFactor = 0.3
 
 	_, retryErr := backoff.Retry(ctx, func() (*containerregistry.DigestResult, error) {
-		daemonCtx, cancelDaemon := daemonDigestLookupContextInternal(ctx, parts.RegistryHost)
-		result, inspectImageDigestViaDaemonErr := s.inspectImageDigestViaDaemonInternal(daemonCtx, parts.NormalizedRef, parts.RegistryHost, externalCreds)
-		cancelDaemon()
+		result, inspectImageDigestViaDaemonErr := s.inspectImageDigestViaDaemonInternal(ctx, parts.NormalizedRef, parts.RegistryHost, externalCreds)
 		if inspectImageDigestViaDaemonErr == nil {
 			lastResult = result
 			return result, nil
@@ -987,23 +984,6 @@ func (s *ContainerRegistryService) InspectImageDigest(ctx context.Context, image
 	}
 
 	return lastResult, nil
-}
-
-func daemonDigestLookupContextInternal(ctx context.Context, registryHost string) (context.Context, context.CancelFunc) {
-	// Private registries may only be reachable through the daemon's TLS or HTTP configuration.
-	switch registryauth.NormalizeRegistryForComparison(registryHost) {
-	case "docker.io", "ghcr.io", "lscr.io":
-	default:
-		return context.WithCancel(ctx)
-	}
-
-	timeout := daemonDigestLookupTimeout
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining < 2*timeout {
-			timeout = remaining / 2
-		}
-	}
-	return context.WithTimeout(ctx, timeout)
 }
 
 // classifyDigestErrorInternal tags digest lookup failures so callers can retry
