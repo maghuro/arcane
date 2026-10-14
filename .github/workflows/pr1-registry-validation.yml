@@ -1,0 +1,45 @@
+name: PR 1 registry validation (isolated)
+
+on:
+  push:
+    branches:
+      - validation/pr1-registry-ci
+
+permissions:
+  contents: read
+
+jobs:
+  registry-validation:
+    name: Registry Go tests and formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache: true
+          cache-dependency-path: |
+            backend/go.sum
+            types/go.sum
+      - name: Report toolchain
+        run: go version
+      - name: Go formatting check on changed files
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(gofmt -l backend/internal/registry/service.go backend/internal/registry/service_test.go)
+          if [ -n "$output" ]; then
+            printf '%s\n' "$output"
+            exit 1
+          fi
+      - name: Registry domain tests with race detection
+        working-directory: backend
+        run: go test -tags=exclude_frontend,buildables -ldflags "-X github.com/getarcaneapp/arcane/backend/v2/buildables.EnabledFeatures=autologin" -race -count=1 ./internal/registry
+      - name: Vet registry domain
+        working-directory: backend
+        run: go vet -tags=exclude_frontend,buildables ./internal/registry
+      - name: Full backend suite
+        working-directory: backend
+        run: go test -tags=exclude_frontend,buildables -ldflags "-X github.com/getarcaneapp/arcane/backend/v2/buildables.EnabledFeatures=autologin" -race ./...
