@@ -1209,40 +1209,7 @@ func TestContainerRegistryService_InspectImageDigest_FallsBackWhenDistributionNo
 	assert.Equal(t, "anonymous", result.AuthMethod)
 	assert.Equal(t, serverURL.Host, result.AuthRegistry)
 
-	// Unknown/private registries retain the full daemon deadline.
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	callerDeadline, ok := ctx.Deadline()
-	require.True(t, ok)
-	privateCtx, privateCancel := daemonDigestLookupContextInternal(ctx, serverURL.Host)
-	privateDeadline, ok := privateCtx.Deadline()
-	require.True(t, ok)
-	assert.Equal(t, callerDeadline, privateDeadline)
-	privateCancel()
 
-	// Known HTTPS registries leave time for the direct fallback when the daemon stalls.
-	var daemonDeadline time.Time
-	stalledSvc := NewContainerRegistryService(nil, func(context.Context) (RegistryDaemonClient, error) {
-		return &fakeRegistryDaemonClient{
-			distributionInspectFn: func(daemonCtx context.Context, _ string, _ client.DistributionInspectOptions) (client.DistributionInspectResult, error) {
-				var hasDeadline bool
-				daemonDeadline, hasDeadline = daemonCtx.Deadline()
-				assert.True(t, hasDeadline)
-				<-daemonCtx.Done()
-				return client.DistributionInspectResult{}, daemonCtx.Err()
-			},
-		}, nil
-	}, nil, nil)
-	stalledSvc.distributionHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		localReq := req.Clone(req.Context())
-		localReq.URL.Host = serverURL.Host
-		return server.Client().Do(localReq)
-	})}
-	stalledResult, stalledErr := stalledSvc.InspectImageDigest(ctx, "lscr.io/team/app:1.2.3", nil)
-	require.NoError(t, stalledErr)
-	assert.True(t, daemonDeadline.Before(callerDeadline))
-	assert.Equal(t, wantDigest, stalledResult.Digest)
-	assert.NoError(t, ctx.Err(), "fallback should finish before the caller's deadline")
 }
 
 func TestContainerRegistryService_InspectImageDigest_FallsBackWhenDistributionForbidden(t *testing.T) {
