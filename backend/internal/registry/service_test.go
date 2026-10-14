@@ -1208,8 +1208,6 @@ func TestContainerRegistryService_InspectImageDigest_FallsBackWhenDistributionNo
 	assert.Equal(t, wantDigest, result.Digest)
 	assert.Equal(t, "anonymous", result.AuthMethod)
 	assert.Equal(t, serverURL.Host, result.AuthRegistry)
-
-
 }
 
 func TestContainerRegistryService_InspectImageDigest_FallsBackWhenDistributionForbidden(t *testing.T) {
