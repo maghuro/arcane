@@ -926,7 +926,7 @@ func (s *ContainerRegistryService) InspectImageDigest(ctx context.Context, image
 	bo.RandomizationFactor = 0.3
 
 	_, retryErr := backoff.Retry(ctx, func() (*containerregistry.DigestResult, error) {
-		daemonCtx, cancelDaemon := daemonDigestLookupContextInternal(ctx)
+		daemonCtx, cancelDaemon := daemonDigestLookupContextInternal(ctx, parts.RegistryHost)
 		result, inspectImageDigestViaDaemonErr := s.inspectImageDigestViaDaemonInternal(daemonCtx, parts.NormalizedRef, parts.RegistryHost, externalCreds)
 		cancelDaemon()
 		if inspectImageDigestViaDaemonErr == nil {
@@ -990,7 +990,14 @@ func (s *ContainerRegistryService) InspectImageDigest(ctx context.Context, image
 	return lastResult, nil
 }
 
-func daemonDigestLookupContextInternal(ctx context.Context) (context.Context, context.CancelFunc) {
+func daemonDigestLookupContextInternal(ctx context.Context, registryHost string) (context.Context, context.CancelFunc) {
+	// Private registries may only be reachable through the daemon's TLS or HTTP configuration.
+	switch registryauth.NormalizeRegistryForComparison(registryHost) {
+	case "docker.io", "ghcr.io", "lscr.io":
+	default:
+		return context.WithCancel(ctx)
+	}
+
 	timeout := daemonDigestLookupTimeout
 	if deadline, ok := ctx.Deadline(); ok {
 		if remaining := time.Until(deadline); remaining < 2*timeout {
@@ -1014,11 +1021,12 @@ func classifyDigestErrorInternal(err error) error {
 	case errors.As(err, &dnsErr) && dnsErr.IsNotFound:
 		// A registry host that does not resolve is a bad reference, not an outage worth retrying.
 		return err
+	case errors.Is(err, context.DeadlineExceeded), errdefs.IsDeadlineExceeded(err),
+		strings.Contains(errLower, "tls handshake timeout"), errors.As(err, &netErr) && netErr.Timeout():
+		return common.Classify(common.ErrTimeout, err)
 	case isRateLimitErrorInternal(err), errdefs.IsUnavailable(err), errors.As(err, &netErr),
 		strings.Contains(errLower, "connection refused"), isTransport && transportErr.StatusCode >= http.StatusInternalServerError:
 		return common.Classify(common.ErrUnavailable, err)
-	case errors.Is(err, context.DeadlineExceeded), errdefs.IsDeadlineExceeded(err), strings.Contains(errLower, "tls handshake timeout"):
-		return common.Classify(common.ErrTimeout, err)
 	case browse.IsUnauthorizedRegistryError(err):
 		return common.Classify(common.ErrUnauthorized, err)
 	case errdefs.IsNotFound(err), isTransport && transportErr.StatusCode == http.StatusNotFound, strings.Contains(errLower, "manifest unknown"):
