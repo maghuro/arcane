@@ -64,7 +64,6 @@ const (
 	registryRateLimitKeyPrefix          = "container_registry:rate_limits:"
 	dockerHubRateLimitRepository        = "ratelimitpreview/test"
 	dockerHubRateLimitTag               = "latest"
-	// Bound daemon digest queries so direct registry fallback has time to run.
 	daemonDigestLookupTimeout           = 10 * time.Second
 )
 
